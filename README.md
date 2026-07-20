@@ -35,11 +35,12 @@ scp media/share-media.sh umbrel@<IP-DO-UMBREL>:/home/umbrel/scripts/
 # No servidor
 sudo chmod +x /home/umbrel/scripts/share-media.sh
 sudo /home/umbrel/scripts/share-media.sh
+sudo /home/umbrel/scripts/share-media.sh --install-service   # mantém após reboot/upgrade
 ```
 
 Depois, no Jellyfin, aponte as bibliotecas para `/media/photos`, `/media/movies` e `/media/series`. No File Browser, use `/data/media/...`.
 
-Para detalhes, flags (`--ensure`, `--check`, `--dry-run`) e cron após updates, veja [@share-media.sh](media/README.md#share-mediash).
+Para detalhes, flags (`--ensure`, `--install-service`, `--check`, `--dry-run`) e logs, veja [@share-media.sh](media/README.md#share-mediash).
 
 ## Requisitos gerais
 

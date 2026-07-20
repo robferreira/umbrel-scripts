@@ -14,7 +14,8 @@
 # QUANDO REEXECUTAR:
 #   Após atualizar o UmbrelOS, Jellyfin ou File Browser, se a mídia sumir
 #   das bibliotecas ou do File Browser, rode o script novamente.
-#   Use --ensure para só reaplicar se o mount tiver sumido (ideal em cron).
+#   Use --ensure para só reaplicar se o mount tiver sumido.
+#   Use --install-service para agendar --ensure no boot e semanalmente.
 #
 # JELLYFIN (configuração única na UI):
 #   Biblioteca de fotos  -> /media/photos
@@ -36,6 +37,8 @@
 #   sudo /home/umbrel/scripts/share-media.sh --restart-only
 #   sudo /home/umbrel/scripts/share-media.sh --ensure
 #   sudo /home/umbrel/scripts/share-media.sh --check
+#   sudo /home/umbrel/scripts/share-media.sh --install-service
+#   sudo /home/umbrel/scripts/share-media.sh --uninstall-service
 # =============================================================================
 
 set -euo pipefail
@@ -55,17 +58,42 @@ FILEBROWSER_MOUNT='${UMBREL_ROOT}/data/media:/data/media'
 
 APP_SCRIPT="/usr/local/lib/node_modules/umbreld/source/modules/apps/legacy-compat/app-script"
 
+# Agendamento automático (reboot + verificação semanal)
+SERVICE_NAME="umbrel-share-media"
+SYSTEMD_SERVICE="/etc/systemd/system/${SERVICE_NAME}.service"
+SYSTEMD_TIMER="/etc/systemd/system/${SERVICE_NAME}.timer"
+CRON_FILE="/etc/cron.d/${SERVICE_NAME}"
+LOG_FILE="${LOG_FILE:-/var/log/share-media.log}"
+BOOT_DELAY_SEC="${BOOT_DELAY_SEC:-120}"
+
 # --- Flags -------------------------------------------------------------------
 DRY_RUN=false
 NO_RESTART=false
 RESTART_ONLY=false
 ENSURE=false
 CHECK_ONLY=false
+INSTALL_SERVICE=false
+UNINSTALL_SERVICE=false
 
 # --- Utilitários -------------------------------------------------------------
 log()  { echo "[share-media] $*"; }
 warn() { echo "[share-media] AVISO: $*" >&2; }
 die()  { echo "[share-media] ERRO: $*" >&2; exit 1; }
+
+script_path() {
+  local src="${BASH_SOURCE[0]}"
+  if command -v realpath >/dev/null 2>&1; then
+    realpath "$src"
+  elif command -v readlink >/dev/null 2>&1; then
+    readlink -f "$src" 2>/dev/null || echo "$src"
+  else
+    echo "$src"
+  fi
+}
+
+has_systemd() {
+  command -v systemctl >/dev/null 2>&1 && [[ -d /run/systemd/system ]]
+}
 
 usage() {
   cat <<'EOF'
@@ -75,30 +103,36 @@ Uso:
   sudo share-media.sh [opções]
 
 Opções:
-  --dry-run       Mostra o que faria, sem alterar nada
-  --no-restart    Aplica pastas e patch do compose, sem reiniciar apps
-  --restart-only  Apenas reinicia jellyfin e file-browser
-  --ensure        Reaplica só se pastas/mount estiverem ausentes (bom para cron)
-  --check         Só verifica o estado atual e sai (código 0 = OK, 1 = precisa ação)
-  -h, --help      Exibe esta ajuda
+  --dry-run             Mostra o que faria, sem alterar nada
+  --no-restart          Aplica pastas e patch do compose, sem reiniciar apps
+  --restart-only        Apenas reinicia jellyfin e file-browser
+  --ensure              Reaplica só se pastas/mount estiverem ausentes
+  --check               Só verifica o estado (exit 0 = OK, 1 = precisa ação)
+  --install-service     Agenda --ensure no boot e semanalmente (systemd ou cron)
+  --uninstall-service   Remove o agendamento instalado
+  -h, --help            Exibe esta ajuda
 
 Variáveis de ambiente:
   UMBREL_ROOT     Raiz do Umbrel (padrão: /home/umbrel/umbrel)
   MEDIA_UID       UID das pastas de mídia (padrão: 1000)
   MEDIA_GID       GID das pastas de mídia (padrão: 1000)
   COMPOSE_SERVICE Nome do serviço no compose (padrão: server)
+  LOG_FILE        Log do agendamento (padrão: /var/log/share-media.log)
+  BOOT_DELAY_SEC  Espera após o boot antes do --ensure (padrão: 120)
 EOF
 }
 
 parse_args() {
   while [[ $# -gt 0 ]]; do
     case "$1" in
-      --dry-run)       DRY_RUN=true ;;
-      --no-restart)    NO_RESTART=true ;;
-      --restart-only)  RESTART_ONLY=true ;;
-      --ensure)        ENSURE=true ;;
-      --check)         CHECK_ONLY=true ;;
-      -h|--help)       usage; exit 0 ;;
+      --dry-run)             DRY_RUN=true ;;
+      --no-restart)          NO_RESTART=true ;;
+      --restart-only)        RESTART_ONLY=true ;;
+      --ensure)              ENSURE=true ;;
+      --check)               CHECK_ONLY=true ;;
+      --install-service)     INSTALL_SERVICE=true ;;
+      --uninstall-service)   UNINSTALL_SERVICE=true ;;
+      -h|--help)             usage; exit 0 ;;
       *) die "Opção desconhecida: $1 (use --help)" ;;
     esac
     shift
@@ -108,7 +142,10 @@ parse_args() {
   [[ "$RESTART_ONLY" == true ]] && ((modes++)) || true
   [[ "$ENSURE" == true ]] && ((modes++)) || true
   [[ "$CHECK_ONLY" == true ]] && ((modes++)) || true
-  [[ "$modes" -le 1 ]] || die "Use apenas uma de: --restart-only, --ensure, --check"
+  [[ "$INSTALL_SERVICE" == true ]] && ((modes++)) || true
+  [[ "$UNINSTALL_SERVICE" == true ]] && ((modes++)) || true
+  [[ "$modes" -le 1 ]] || die \
+    "Use apenas uma de: --restart-only, --ensure, --check, --install-service, --uninstall-service"
 }
 
 require_root() {
@@ -494,9 +531,157 @@ run_ensure() {
   fi
 }
 
+install_systemd_units() {
+  local script="$1"
+
+  if [[ "$DRY_RUN" == true ]]; then
+    log "(dry-run) Criaria ${SYSTEMD_SERVICE} e ${SYSTEMD_TIMER}"
+    log "(dry-run) ExecStart=${script} --ensure"
+    log "(dry-run) OnBootSec=${BOOT_DELAY_SEC}s + verificação semanal (domingo 04:00)"
+    return 0
+  fi
+
+  cat > "$SYSTEMD_SERVICE" <<EOF
+[Unit]
+Description=Umbrel share-media ensure (File Browser + Jellyfin)
+After=network-online.target docker.service
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+Environment=UMBREL_ROOT=${UMBREL_ROOT}
+Environment=MEDIA_UID=${MEDIA_UID}
+Environment=MEDIA_GID=${MEDIA_GID}
+Environment=COMPOSE_SERVICE=${COMPOSE_SERVICE}
+ExecStart=${script} --ensure
+StandardOutput=append:${LOG_FILE}
+StandardError=append:${LOG_FILE}
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+  cat > "$SYSTEMD_TIMER" <<EOF
+[Unit]
+Description=Timer for Umbrel share-media ensure (boot + weekly)
+
+[Timer]
+OnBootSec=${BOOT_DELAY_SEC}
+OnCalendar=Sun *-*-* 04:00:00
+Persistent=true
+Unit=${SERVICE_NAME}.service
+
+[Install]
+WantedBy=timers.target
+EOF
+
+  systemctl daemon-reload
+  systemctl enable --now "${SERVICE_NAME}.timer"
+  log "systemd instalado: ${SYSTEMD_TIMER}"
+  log "  - no boot: espera ${BOOT_DELAY_SEC}s e roda --ensure"
+  log "  - semanal: domingo 04:00 (pega upgrades sem reboot)"
+  log "  - log: ${LOG_FILE}"
+  log "Status: systemctl status ${SERVICE_NAME}.timer"
+}
+
+install_cron() {
+  local script="$1"
+
+  if [[ "$DRY_RUN" == true ]]; then
+    log "(dry-run) Criaria ${CRON_FILE}"
+    log "(dry-run) @reboot sleep ${BOOT_DELAY_SEC} && ${script} --ensure"
+    log "(dry-run) 0 4 * * 0 ${script} --ensure"
+    return 0
+  fi
+
+  cat > "$CRON_FILE" <<EOF
+# Gerenciado por share-media.sh — não edite à mão; use --uninstall-service
+SHELL=/bin/bash
+PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+UMBREL_ROOT=${UMBREL_ROOT}
+
+@reboot root sleep ${BOOT_DELAY_SEC} && ${script} --ensure >> ${LOG_FILE} 2>&1
+0 4 * * 0 root ${script} --ensure >> ${LOG_FILE} 2>&1
+EOF
+  chmod 644 "$CRON_FILE"
+  log "cron instalado: ${CRON_FILE}"
+  log "  - no boot: espera ${BOOT_DELAY_SEC}s e roda --ensure"
+  log "  - semanal: domingo 04:00"
+  log "  - log: ${LOG_FILE}"
+}
+
+remove_cron_if_present() {
+  if [[ -f "$CRON_FILE" ]]; then
+    if [[ "$DRY_RUN" == true ]]; then
+      log "(dry-run) Removeria ${CRON_FILE}"
+    else
+      rm -f "$CRON_FILE"
+      log "Removido: ${CRON_FILE}"
+    fi
+  fi
+}
+
+remove_systemd_if_present() {
+  if [[ -f "$SYSTEMD_TIMER" ]] || [[ -f "$SYSTEMD_SERVICE" ]]; then
+    if [[ "$DRY_RUN" == true ]]; then
+      log "(dry-run) Desabilitaria e removeria unidades systemd ${SERVICE_NAME}"
+      return 0
+    fi
+    if has_systemd; then
+      systemctl disable --now "${SERVICE_NAME}.timer" 2>/dev/null || true
+      systemctl disable --now "${SERVICE_NAME}.service" 2>/dev/null || true
+    fi
+    rm -f "$SYSTEMD_TIMER" "$SYSTEMD_SERVICE"
+    if has_systemd; then
+      systemctl daemon-reload 2>/dev/null || true
+    fi
+    log "Unidades systemd removidas: ${SERVICE_NAME}"
+  fi
+}
+
+install_service() {
+  local script
+  script="$(script_path)"
+  [[ -f "$script" ]] || die "Script não encontrado: $script"
+  [[ -x "$script" ]] || chmod +x "$script"
+
+  log "Instalando agendamento automático (--ensure no boot + semanal) ..."
+  log "Script: ${script}"
+
+  # Evita duplicar: remove o outro backend antes de instalar
+  if has_systemd; then
+    remove_cron_if_present
+    install_systemd_units "$script"
+  else
+    warn "systemd não disponível — usando cron"
+    remove_systemd_if_present
+    install_cron "$script"
+  fi
+
+  log "Pronto. Após reboot ou upgrade, o mount será reaplicado se sumir."
+}
+
+uninstall_service() {
+  log "Removendo agendamento automático ..."
+  remove_systemd_if_present
+  remove_cron_if_present
+  log "Agendamento removido. O share de mídia nos composes não foi alterado."
+}
+
 main() {
   parse_args "$@"
   require_root
+
+  if [[ "$INSTALL_SERVICE" == true ]]; then
+    install_service
+    exit 0
+  fi
+
+  if [[ "$UNINSTALL_SERVICE" == true ]]; then
+    uninstall_service
+    exit 0
+  fi
+
   check_dependencies
 
   log "Umbrel root: ${UMBREL_ROOT}"
