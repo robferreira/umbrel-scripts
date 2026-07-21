@@ -10,19 +10,19 @@ Coloque novos scripts de mídia nesta pasta e documente cada um abaixo com uma s
 
 ### O que é
 
-Script Bash que faz o **File Browser** e o **Jellyfin** usarem a **mesma pasta de mídia** no host Umbrel.
+Script Bash que faz o **File Browser** e o **Jellyfin** enxergarem a **mesma mídia** no Umbrel, usando o storage nativo do sistema:
 
-Sem isso, cada app vê só o próprio volume Docker: o que você envia no File Browser não aparece no Jellyfin (e o contrário também).
+`/home/umbrel/umbrel/data/storage`
+
+O File Browser **já** monta esse storage em `/data`. O script só precisa montar o mesmo caminho no Jellyfin em `/media` e criar as pastas `photos`, `movies` e `series`.
 
 ### O que ele faz
 
-1. Cria `/home/umbrel/umbrel/data/media` com subpastas `photos`, `movies` e `series`
-2. Ajusta dono (`1000:1000` por padrão) e `chmod 755` **apenas em diretórios** (não altera permissões de arquivos)
-3. Adiciona volume no `docker-compose.yml` de cada app (com backup + rollback se o patch falhar):
-   - Jellyfin → `…/data/media` montado em `/media`
-   - File Browser → `…/data/media` montado em `/data/media`
-4. Reinicia os dois apps
-5. Verifica se o mount está no compose e (quando aplicável) no container em execução
+1. Cria em `data/storage` as pastas `photos`, `movies` e `series` (sem alterar dono de todo o storage)
+2. Remove mounts legados de versões antigas (`data/media`) nos composes
+3. Adiciona no Jellyfin: `${UMBREL_ROOT}/data/storage` → `/media` (com backup + rollback)
+4. **Não** altera o File Browser (já tem `data/storage` → `/data`)
+5. Reinicia Jellyfin (e File Browser) e verifica os mounts
 
 ### Pré-requisitos
 
@@ -57,7 +57,7 @@ scp -r . umbrel@<IP-DO-UMBREL>:/home/umbrel/umbrel-scripts
 
 ### Manter após reboot ou upgrade
 
-O Umbrel pode **reescrever** o `docker-compose.yml` depois de atualizar o SO ou os apps — e o mount de mídia some. Para isso existir o modo `--ensure` e o agendamento automático.
+O Umbrel pode **reescrever** o `docker-compose.yml` do Jellyfin depois de atualizar — e o mount de `/media` some. Use `--ensure` ou o agendamento automático.
 
 #### Instalar o agendamento (recomendado)
 
@@ -65,75 +65,28 @@ O Umbrel pode **reescrever** o `docker-compose.yml` depois de atualizar o SO ou 
 sudo /home/umbrel/umbrel-scripts/media/share-media.sh --install-service
 ```
 
-Isso configura:
-
 | Quando | O que acontece |
 |--------|----------------|
-| **No boot** | Espera **120s** (Docker/apps subirem) e roda `--ensure` |
-| **Toda domingo 04:00** | Roda `--ensure` de novo (pega upgrades sem reboot) |
+| **No boot** | Espera **120s** e roda `--ensure` |
+| **Toda domingo 04:00** | Roda `--ensure` de novo |
 
-Preferência de backend:
+Preferência: **systemd** (`umbrel-share-media.timer`); fallback **cron**. Log: `/var/log/share-media.log`.
 
-1. **systemd** (timer `umbrel-share-media.timer`) — se disponível
-2. **cron** (`/etc/cron.d/umbrel-share-media`) — fallback
-
-Logs em `/var/log/share-media.log`.
-
-#### Verificar se está agendado
+#### Verificar / remover
 
 ```bash
-# Se usou systemd:
 systemctl status umbrel-share-media.timer
-systemctl list-timers | grep share-media
-
-# Se usou cron:
-cat /etc/cron.d/umbrel-share-media
-
-# Ver log
-tail -f /var/log/share-media.log
-```
-
-#### Remover o agendamento
-
-```bash
 sudo /home/umbrel/umbrel-scripts/media/share-media.sh --uninstall-service
-```
-
-Isso **não** desfaz o share nos composes — só para de rodar sozinho.
-
-#### Ajuste fino (opcional)
-
-```bash
-# Espera maior no boot (ex.: 3 minutos) e outro arquivo de log
-sudo BOOT_DELAY_SEC=180 LOG_FILE=/var/log/share-media.log \
-  /home/umbrel/umbrel-scripts/media/share-media.sh --install-service
 ```
 
 ### Uso
 
 ```bash
-# Execução completa (pastas + patch + reinício + verificação)
 sudo /home/umbrel/umbrel-scripts/media/share-media.sh
-
-# Só simula (não altera nada)
 sudo /home/umbrel/umbrel-scripts/media/share-media.sh --dry-run
-
-# Aplica pastas/patch sem reiniciar
-sudo /home/umbrel/umbrel-scripts/media/share-media.sh --no-restart
-
-# Só reinicia jellyfin e file-browser
-sudo /home/umbrel/umbrel-scripts/media/share-media.sh --restart-only
-
-# Reaplica somente se pastas/mount estiverem ausentes
 sudo /home/umbrel/umbrel-scripts/media/share-media.sh --ensure
-
-# Só verifica o estado (exit 0 = OK, exit 1 = precisa ação)
 sudo /home/umbrel/umbrel-scripts/media/share-media.sh --check
-
-# Agenda no boot + semanalmente
 sudo /home/umbrel/umbrel-scripts/media/share-media.sh --install-service
-
-# Remove o agendamento
 sudo /home/umbrel/umbrel-scripts/media/share-media.sh --uninstall-service
 ```
 
@@ -141,19 +94,26 @@ sudo /home/umbrel/umbrel-scripts/media/share-media.sh --uninstall-service
 
 | App | Caminho |
 |-----|---------|
-| **Jellyfin** — biblioteca de fotos | `/media/photos` |
+| **Jellyfin** — fotos | `/media/photos` |
 | **Jellyfin** — filmes | `/media/movies` |
 | **Jellyfin** — séries | `/media/series` |
-| **File Browser** — upload | `/data/media/photos`, `/data/media/movies`, `/data/media/series` |
+| **File Browser** — upload | `/photos`, `/movies`, `/series` (raiz do app) |
 
-É a mesma pasta física no host; só muda o caminho dentro de cada container.
+No host é a mesma pasta: `/home/umbrel/umbrel/data/storage/{photos,movies,series}`.
 
-### Quando reexecutar manualmente
+> **Nota:** o path nativo `/downloads` do Jellyfin continua existindo (só `data/storage/downloads`). Use `/media/...` para as bibliotecas compartilhadas com o File Browser.
 
-Se a mídia sumir e o agendamento não estiver instalado (ou ainda não rodou):
+### Migração (se rodou a versão antiga com `data/media`)
+
+1. Rode o script de novo — ele remove mounts `data/media` e aplica `data/storage` → `/media` no Jellyfin
+2. No File Browser, use `/photos`, `/movies`, `/series` (não mais `/data/media/...`)
+3. No Jellyfin, atualize as bibliotecas para `/media/photos`, `/media/movies`, `/media/series`
+4. Se houver arquivos em `data/media`, copie para `data/storage`:
 
 ```bash
-sudo /home/umbrel/umbrel-scripts/media/share-media.sh --ensure
+sudo cp -a /home/umbrel/umbrel/data/media/photos /home/umbrel/umbrel/data/storage/ 2>/dev/null || true
+sudo cp -a /home/umbrel/umbrel/data/media/movies /home/umbrel/umbrel/data/storage/ 2>/dev/null || true
+sudo cp -a /home/umbrel/umbrel/data/media/series /home/umbrel/umbrel/data/storage/ 2>/dev/null || true
 ```
 
 ### Variáveis de ambiente
@@ -161,18 +121,11 @@ sudo /home/umbrel/umbrel-scripts/media/share-media.sh --ensure
 | Variável | Padrão | Descrição |
 |----------|--------|-----------|
 | `UMBREL_ROOT` | `/home/umbrel/umbrel` | Raiz da instalação Umbrel |
-| `MEDIA_UID` | `1000` | UID dono das pastas de mídia |
-| `MEDIA_GID` | `1000` | GID dono das pastas de mídia |
-| `COMPOSE_SERVICE` | `server` | Nome do serviço no `docker-compose.yml` |
+| `MEDIA_UID` | `1000` | UID das pastas `photos`/`movies`/`series` |
+| `MEDIA_GID` | `1000` | GID das pastas |
+| `COMPOSE_SERVICE` | `server` | Nome do serviço no compose |
 | `LOG_FILE` | `/var/log/share-media.log` | Log do agendamento |
-| `BOOT_DELAY_SEC` | `120` | Segundos de espera após o boot |
-
-Exemplo:
-
-```bash
-sudo UMBREL_ROOT=/home/umbrel/umbrel COMPOSE_SERVICE=server \
-  /home/umbrel/umbrel-scripts/media/share-media.sh --ensure
-```
+| `BOOT_DELAY_SEC` | `120` | Espera após o boot |
 
 ### Ajuda
 

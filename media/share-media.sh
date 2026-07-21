@@ -21,8 +21,11 @@
 #   Biblioteca de filmes -> /media/movies
 #   Biblioteca de séries -> /media/series
 #
-# FILE BROWSER:
-#   Envie arquivos para /data/media/photos, /data/media/movies ou /data/media/series
+# FILE BROWSER (já monta data/storage em /data — FB_ROOT=/data):
+#   Envie arquivos para /photos, /movies ou /series (raiz do File Browser)
+#
+# HOST (compartilhado):
+#   /home/umbrel/umbrel/data/storage/{photos,movies,series}
 #
 # VARIÁVEIS DE AMBIENTE:
 #   UMBREL_ROOT   Raiz da instalação Umbrel (padrão: /home/umbrel/umbrel)
@@ -43,17 +46,24 @@
 set -euo pipefail
 
 # --- Configuração ------------------------------------------------------------
+# File Browser (Umbrel) já monta data/storage em /data.
+# Este script só precisa montar o mesmo storage no Jellyfin em /media.
 UMBREL_ROOT="${UMBREL_ROOT:-/home/umbrel/umbrel}"
-MEDIA_ROOT="${UMBREL_ROOT}/data/media"
+STORAGE_REL="data/storage"
+LEGACY_MEDIA_REL="data/media"
+MEDIA_ROOT="${UMBREL_ROOT}/${STORAGE_REL}"
 MEDIA_SUBDIRS=(photos movies series)
-APPS=(jellyfin file-browser)
+REQUIRED_APPS=(jellyfin file-browser)
+PATCH_APPS=(jellyfin)
+RESTART_APPS=(jellyfin file-browser)
 MARKER="# umbrel-media-share"
 MEDIA_UID="${MEDIA_UID:-1000}"
 MEDIA_GID="${MEDIA_GID:-1000}"
 COMPOSE_SERVICE="${COMPOSE_SERVICE:-server}"
 
-JELLYFIN_MOUNT='${UMBREL_ROOT}/data/media:/media'
-FILEBROWSER_MOUNT='${UMBREL_ROOT}/data/media:/data/media'
+JELLYFIN_MOUNT='${UMBREL_ROOT}/data/storage:/media'
+# Mount nativo do File Browser no Umbrel (não adicionamos outro volume)
+FILEBROWSER_NATIVE_MOUNT='${UMBREL_ROOT}/data/storage:/data'
 
 APP_SCRIPT="/usr/local/lib/node_modules/umbreld/source/modules/apps/legacy-compat/app-script"
 
@@ -165,9 +175,8 @@ has_umbreld() {
 
 mount_for_app() {
   case "$1" in
-    jellyfin)      echo "$JELLYFIN_MOUNT" ;;
-    file-browser)  echo "$FILEBROWSER_MOUNT" ;;
-    *) die "App desconhecido: $1" ;;
+    jellyfin) echo "$JELLYFIN_MOUNT" ;;
+    *) die "App sem mount gerenciado por este script: $1" ;;
   esac
 }
 
@@ -192,7 +201,7 @@ app_installed() {
 require_apps_installed() {
   local missing=()
   local app
-  for app in "${APPS[@]}"; do
+  for app in "${REQUIRED_APPS[@]}"; do
     app_installed "$app" || missing+=("$app")
   done
   [[ ${#missing[@]} -eq 0 ]] || die \
@@ -204,18 +213,31 @@ compose_service_exists() {
   yq -e ".services.${COMPOSE_SERVICE}" "$compose_file" >/dev/null 2>&1
 }
 
+compose_has_host_mount() {
+  local compose_file="$1"
+  local host_rel="$2"
+  local mount_dest="$3"
+  grep -qF "\${UMBREL_ROOT}/${host_rel}:${mount_dest}" "$compose_file" 2>/dev/null
+}
+
 compose_has_media_mount() {
   local compose_file="$1"
   local mount_dest="$2"
-  grep -qF '${UMBREL_ROOT}/data/media:'"${mount_dest}" "$compose_file" 2>/dev/null
+  compose_has_host_mount "$compose_file" "$STORAGE_REL" "$mount_dest"
 }
 
-# Remove entradas antigas gerenciadas por este script (marcador ou mount duplicado)
+file_browser_native_ok() {
+  local compose_file
+  compose_file="$(compose_file_for file-browser)"
+  compose_has_host_mount "$compose_file" "$STORAGE_REL" "/data"
+}
+
+# Remove mounts legados (data/media) e duplicatas do destino atual
 remove_old_media_entries() {
   local compose_file="$1"
   local mount_dest="$2"
 
-  if ! grep -qF '${UMBREL_ROOT}/data/media' "$compose_file" 2>/dev/null \
+  if ! grep -qE 'UMBREL_ROOT.*/data/(media|storage)' "$compose_file" 2>/dev/null \
      && ! grep -qF "$MARKER" "$compose_file" 2>/dev/null; then
     return 0
   fi
@@ -224,10 +246,44 @@ remove_old_media_entries() {
   tmp="$(mktemp)"
   awk -v marker="$MARKER" -v dest=":${mount_dest}" '
     index($0, marker) { next }
-    /\$\{UMBREL_ROOT\}\/data\/media/ && index($0, dest) { next }
+    /\$\{UMBREL_ROOT\}\/data\/media/ { next }
+    /\$\{UMBREL_ROOT\}\/data\/storage/ && index($0, dest) { next }
     { print }
   ' "$compose_file" > "$tmp"
   mv "$tmp" "$compose_file"
+}
+
+# Remove só mounts legados data/media (ex.: File Browser de versões antigas do script)
+cleanup_legacy_media_mounts() {
+  local app="$1"
+  local compose_file
+
+  app_installed "$app" || return 0
+  compose_file="$(compose_file_for "$app")"
+
+  if ! grep -qF '${UMBREL_ROOT}/data/media' "$compose_file" 2>/dev/null \
+     && ! grep -qF "$MARKER" "$compose_file" 2>/dev/null; then
+    return 0
+  fi
+
+  log "[$app] Removendo mounts legados (data/media) ..."
+  if [[ "$DRY_RUN" == true ]]; then
+    log "[$app] (dry-run) Removeria entradas ${LEGACY_MEDIA_REL} e marcadores"
+    return 0
+  fi
+
+  local backup="${compose_file}.bak.legacy.$(date +%Y%m%d-%H%M%S)"
+  cp -a "$compose_file" "$backup"
+
+  local tmp
+  tmp="$(mktemp)"
+  awk -v marker="$MARKER" '
+    index($0, marker) { next }
+    /\$\{UMBREL_ROOT\}\/data\/media/ { next }
+    { print }
+  ' "$compose_file" > "$tmp"
+  mv "$tmp" "$compose_file"
+  log "[$app] Legacy limpo (backup: $backup)"
 }
 
 restore_backup() {
@@ -252,7 +308,7 @@ patch_compose() {
   fi
 
   if compose_has_media_mount "$compose_file" "$mount_dest"; then
-    log "[$app] Volume de mídia já configurado em $(basename "$compose_file")"
+    log "[$app] Volume de storage já configurado em $(basename "$compose_file")"
     return 0
   fi
 
@@ -270,7 +326,7 @@ patch_compose() {
   remove_old_media_entries "$compose_file" "$mount_dest"
 
   # Mantém ${UMBREL_ROOT} literal (substituído pelo Umbrel ao subir o container)
-  if ! yq -i ".services.${COMPOSE_SERVICE}.volumes += [\"\${UMBREL_ROOT}/data/media:${mount_dest}\"]" \
+  if ! yq -i ".services.${COMPOSE_SERVICE}.volumes += [\"\${UMBREL_ROOT}/${STORAGE_REL}:${mount_dest}\"]" \
       "$compose_file"; then
     restore_backup "$compose_file" "$backup"
     die "[$app] Falha ao aplicar yq; compose restaurado do backup"
@@ -285,7 +341,7 @@ patch_compose() {
   local tmp
   tmp="$(mktemp)"
   awk -v dest=":${mount_dest}" -v marker="$MARKER" '
-    /\$\{UMBREL_ROOT\}\/data\/media/ && index($0, dest) && !seen {
+    /\$\{UMBREL_ROOT\}\/data\/storage/ && index($0, dest) && !seen {
       match($0, /^[[:space:]]*/)
       indent = substr($0, RSTART, RLENGTH)
       print indent marker
@@ -299,10 +355,10 @@ patch_compose() {
 }
 
 setup_media_dirs() {
-  log "Criando estrutura em ${MEDIA_ROOT} ..."
+  log "Criando pastas de mídia em ${MEDIA_ROOT} ..."
   if [[ "$DRY_RUN" == true ]]; then
     log "(dry-run) mkdir -p ${MEDIA_ROOT}/{${MEDIA_SUBDIRS[*]}}"
-    log "(dry-run) chown ${MEDIA_UID}:${MEDIA_GID} nas pastas; chmod 755 só em diretórios"
+    log "(dry-run) chown ${MEDIA_UID}:${MEDIA_GID} e chmod 755 só nas subpastas criadas"
     return 0
   fi
 
@@ -310,11 +366,10 @@ setup_media_dirs() {
   local sub
   for sub in "${MEDIA_SUBDIRS[@]}"; do
     mkdir -p "${MEDIA_ROOT}/${sub}"
+    # Não faz chown -R em todo data/storage (há downloads e outros dados do Umbrel)
+    chown "${MEDIA_UID}:${MEDIA_GID}" "${MEDIA_ROOT}/${sub}"
+    chmod 755 "${MEDIA_ROOT}/${sub}"
   done
-
-  # Ajusta dono na árvore; permissões 755 apenas em diretórios (não sobrescreve arquivos)
-  chown -R "${MEDIA_UID}:${MEDIA_GID}" "${MEDIA_ROOT}"
-  find "${MEDIA_ROOT}" -type d -exec chmod 755 {} +
   log "Pastas prontas: ${MEDIA_ROOT}/{${MEDIA_SUBDIRS[*]}}"
 }
 
@@ -329,12 +384,13 @@ media_dirs_ok() {
 
 compose_mounts_ok() {
   local app compose_file mount_dest
-  for app in "${APPS[@]}"; do
+  for app in "${PATCH_APPS[@]}"; do
     app_installed "$app" || return 1
     compose_file="$(compose_file_for "$app")"
     mount_dest="$(mount_dest_for_app "$app")"
     compose_has_media_mount "$compose_file" "$mount_dest" || return 1
   done
+  file_browser_native_ok || return 1
   return 0
 }
 
@@ -366,11 +422,12 @@ find_container() {
   docker ps --format '{{.Names}}' | grep -E "${pattern}" | head -n1 || true
 }
 
-container_has_media_mount() {
+container_has_storage_mount() {
   local container="$1"
+  local dest_hint="$2"
   docker inspect "$container" \
     --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}' \
-    2>/dev/null | grep -qF "data/media"
+    2>/dev/null | grep -F "data/storage" | grep -qF "$dest_hint"
 }
 
 verify_setup() {
@@ -387,59 +444,85 @@ verify_setup() {
     status=1
   fi
 
-  local app container mount_grep compose_file mount_dest
-  for app in "${APPS[@]}"; do
+  # Jellyfin: mount data/storage -> /media
+  local app="jellyfin" container compose_file mount_dest
+  if ! app_installed "$app"; then
+    warn "[$app] App não instalado (compose ausente)"
+    status=1
+  else
     mount_dest="$(mount_dest_for_app "$app")"
-    mount_grep="$mount_dest"
-
-    if ! app_installed "$app"; then
-      warn "[$app] App não instalado (compose ausente)"
-      status=1
-      continue
-    fi
-
     compose_file="$(compose_file_for "$app")"
     if compose_has_media_mount "$compose_file" "$mount_dest"; then
-      log "[$app] Compose OK: mount -> ${mount_dest}"
+      log "[$app] Compose OK: ${STORAGE_REL} -> ${mount_dest}"
     else
-      warn "[$app] Compose SEM mount de mídia (esperado: ${mount_dest})"
+      warn "[$app] Compose SEM mount de storage (esperado: ${STORAGE_REL}:${mount_dest})"
       status=1
     fi
 
-    if [[ "$expect_live" != true ]]; then
+    if [[ "$expect_live" == true ]]; then
+      container="$(find_container "${app}")"
+      if [[ -z "$container" ]]; then
+        warn "[$app] Container não encontrado em docker ps"
+        status=1
+      else
+        log "[$app] Container: ${container}"
+        local mounts
+        mounts="$(docker inspect "$container" \
+          --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}' \
+          2>/dev/null | grep -F "data/storage" || true)"
+        if echo "$mounts" | grep -qF "/media"; then
+          log "[$app] Mount OK:"
+          echo "$mounts" | while read -r line; do [[ -n "$line" ]] && log "  $line"; done
+        else
+          warn "[$app] Mount data/storage -> /media não encontrado no container"
+          log "[$app] Todos os mounts:"
+          docker inspect "$container" \
+            --format '{{range .Mounts}}  {{.Source}} -> {{.Destination}}{{"\n"}}{{end}}' \
+            2>/dev/null || true
+          status=1
+        fi
+      fi
+    else
       log "[$app] (pulando inspeção do container — dry-run / estado ainda não reiniciado)"
-      continue
     fi
+  fi
 
-    container="$(find_container "${app}")"
-    if [[ -z "$container" ]]; then
-      warn "[$app] Container não encontrado em docker ps"
-      status=1
-      continue
-    fi
-
-    log "[$app] Container: ${container}"
-    local mounts
-    mounts="$(docker inspect "$container" \
-      --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}' \
-      2>/dev/null | grep -F "data/media" || true)"
-
-    if [[ -n "$mounts" ]]; then
-      log "[$app] Mount OK:"
-      echo "$mounts" | while read -r line; do log "  $line"; done
+  # File Browser: mount nativo data/storage -> /data
+  app="file-browser"
+  if ! app_installed "$app"; then
+    warn "[$app] App não instalado (compose ausente)"
+    status=1
+  else
+    compose_file="$(compose_file_for "$app")"
+    if file_browser_native_ok; then
+      log "[$app] Compose OK (nativo): ${STORAGE_REL} -> /data"
     else
-      warn "[$app] Mount de mídia não encontrado no container (destino esperado: ${mount_grep})"
-      log "[$app] Todos os mounts:"
-      docker inspect "$container" \
-        --format '{{range .Mounts}}  {{.Source}} -> {{.Destination}}{{"\n"}}{{end}}' \
-        2>/dev/null || true
+      warn "[$app] Compose sem mount nativo ${FILEBROWSER_NATIVE_MOUNT}"
       status=1
     fi
-  done
+
+    if [[ "$expect_live" == true ]]; then
+      container="$(find_container "${app}")"
+      if [[ -z "$container" ]]; then
+        warn "[$app] Container não encontrado em docker ps"
+        status=1
+      else
+        log "[$app] Container: ${container}"
+        if container_has_storage_mount "$container" "/data"; then
+          log "[$app] Mount OK: data/storage -> /data"
+        else
+          warn "[$app] Mount data/storage -> /data não encontrado no container"
+          status=1
+        fi
+      fi
+    else
+      log "[$app] (pulando inspeção do container — dry-run / estado ainda não reiniciado)"
+    fi
+  fi
 
   log "================================="
-  log "Jellyfin: configure bibliotecas em /media/photos, /media/movies, /media/series"
-  log "File Browser: use /data/media/photos, /data/media/movies, /data/media/series"
+  log "Jellyfin: bibliotecas em /media/photos, /media/movies, /media/series"
+  log "File Browser: pastas /photos, /movies, /series (raiz do app)"
   return "$status"
 }
 
@@ -451,14 +534,18 @@ needs_action() {
 
 apply_compose_patches() {
   local app
-  for app in "${APPS[@]}"; do
+  # Limpa mounts antigos data/media de versões anteriores do script
+  for app in "${REQUIRED_APPS[@]}"; do
+    cleanup_legacy_media_mounts "$app"
+  done
+  for app in "${PATCH_APPS[@]}"; do
     patch_compose "$app"
   done
 }
 
 restart_apps() {
   local app
-  for app in "${APPS[@]}"; do
+  for app in "${RESTART_APPS[@]}"; do
     restart_app "$app"
   done
 }
@@ -503,10 +590,17 @@ run_ensure() {
     fi
     # Ainda valida containers ao vivo; se mount sumiu do runtime, reinicia
     local app container needs_restart=false
-    for app in "${APPS[@]}"; do
+    for app in jellyfin; do
       container="$(find_container "${app}")"
-      if [[ -z "$container" ]] || ! container_has_media_mount "$container"; then
-        warn "[$app] Container sem mount ao vivo — será reiniciado"
+      if [[ -z "$container" ]] || ! container_has_storage_mount "$container" "/media"; then
+        warn "[$app] Container sem mount data/storage -> /media — será reiniciado"
+        needs_restart=true
+      fi
+    done
+    for app in file-browser; do
+      container="$(find_container "${app}")"
+      if [[ -z "$container" ]] || ! container_has_storage_mount "$container" "/data"; then
+        warn "[$app] Container sem mount data/storage -> /data — será reiniciado"
         needs_restart=true
       fi
     done
