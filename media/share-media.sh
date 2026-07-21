@@ -3,13 +3,12 @@
 # share-media.sh
 # Compartilha a pasta de mídia entre File Browser e Jellyfin no UmbrelOS.
 #
-# INSTALAÇÃO (no seu PC):
-#   scp media/share-media.sh umbrel@<IP-DO-UMBREL>:/home/umbrel/scripts/
-#
-# NO SERVIDOR (SSH):
-#   sudo mkdir -p /home/umbrel/scripts
-#   sudo chmod +x /home/umbrel/scripts/share-media.sh
-#   sudo /home/umbrel/scripts/share-media.sh
+# INSTALAÇÃO (caminho padrão: /home/umbrel/umbrel-scripts/media):
+#   cd /home/umbrel
+#   git clone https://github.com/robferreira/umbrel-scripts.git
+#   sudo chmod +x /home/umbrel/umbrel-scripts/media/share-media.sh
+#   sudo /home/umbrel/umbrel-scripts/media/share-media.sh
+#   sudo /home/umbrel/umbrel-scripts/media/share-media.sh --install-service
 #
 # QUANDO REEXECUTAR:
 #   Após atualizar o UmbrelOS, Jellyfin ou File Browser, se a mídia sumir
@@ -31,14 +30,14 @@
 #   MEDIA_GID     GID dono das pastas (padrão: 1000)
 #
 # USO:
-#   sudo /home/umbrel/scripts/share-media.sh           # execução completa
-#   sudo /home/umbrel/scripts/share-media.sh --dry-run
-#   sudo /home/umbrel/scripts/share-media.sh --no-restart
-#   sudo /home/umbrel/scripts/share-media.sh --restart-only
-#   sudo /home/umbrel/scripts/share-media.sh --ensure
-#   sudo /home/umbrel/scripts/share-media.sh --check
-#   sudo /home/umbrel/scripts/share-media.sh --install-service
-#   sudo /home/umbrel/scripts/share-media.sh --uninstall-service
+#   sudo /home/umbrel/umbrel-scripts/media/share-media.sh           # execução completa
+#   sudo /home/umbrel/umbrel-scripts/media/share-media.sh --dry-run
+#   sudo /home/umbrel/umbrel-scripts/media/share-media.sh --no-restart
+#   sudo /home/umbrel/umbrel-scripts/media/share-media.sh --restart-only
+#   sudo /home/umbrel/umbrel-scripts/media/share-media.sh --ensure
+#   sudo /home/umbrel/umbrel-scripts/media/share-media.sh --check
+#   sudo /home/umbrel/umbrel-scripts/media/share-media.sh --install-service
+#   sudo /home/umbrel/umbrel-scripts/media/share-media.sh --uninstall-service
 # =============================================================================
 
 set -euo pipefail

@@ -2,6 +2,8 @@
 
 Scripts utilitários para **UmbrelOS** — automação de pastas compartilhadas, apps e manutenção do servidor.
 
+Instalação típica no Umbrel: clonar em `/home/umbrel/umbrel-scripts` (scripts de mídia em `/home/umbrel/umbrel-scripts/media`).
+
 ## Estrutura
 
 ```
@@ -29,13 +31,17 @@ Documentação detalhada: [media/README.md](media/README.md)
 ## Uso rápido — share-media
 
 ```bash
-# Copiar para o Umbrel
-scp media/share-media.sh umbrel@<IP-DO-UMBREL>:/home/umbrel/scripts/
+# No Umbrel: clonar o repositório em /home/umbrel
+cd /home/umbrel
+git clone https://github.com/robferreira/umbrel-scripts.git
+
+# Ou, a partir do seu PC, copiar o repositório inteiro:
+# scp -r . umbrel@<IP-DO-UMBREL>:/home/umbrel/umbrel-scripts
 
 # No servidor
-sudo chmod +x /home/umbrel/scripts/share-media.sh
-sudo /home/umbrel/scripts/share-media.sh
-sudo /home/umbrel/scripts/share-media.sh --install-service   # mantém após reboot/upgrade
+sudo chmod +x /home/umbrel/umbrel-scripts/media/share-media.sh
+sudo /home/umbrel/umbrel-scripts/media/share-media.sh
+sudo /home/umbrel/umbrel-scripts/media/share-media.sh --install-service   # mantém após reboot/upgrade
 ```
 
 Depois, no Jellyfin, aponte as bibliotecas para `/media/photos`, `/media/movies` e `/media/series`. No File Browser, use `/data/media/...`.

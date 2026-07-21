@@ -32,23 +32,27 @@ Sem isso, cada app vê só o próprio volume Docker: o que você envia no File B
 
 ### Instalação no Umbrel
 
-No seu PC (a partir da raiz deste repositório):
+Caminho padrão dos scripts: `/home/umbrel/umbrel-scripts/media`.
+
+No Umbrel (SSH ou terminal web):
 
 ```bash
-scp media/share-media.sh umbrel@<IP-DO-UMBREL>:/home/umbrel/scripts/
-```
+cd /home/umbrel
+git clone https://github.com/robferreira/umbrel-scripts.git
 
-No servidor (SSH ou terminal web):
-
-```bash
-sudo mkdir -p /home/umbrel/scripts
-sudo chmod +x /home/umbrel/scripts/share-media.sh
+sudo chmod +x /home/umbrel/umbrel-scripts/media/share-media.sh
 
 # 1) Aplica o share agora
-sudo /home/umbrel/scripts/share-media.sh
+sudo /home/umbrel/umbrel-scripts/media/share-media.sh
 
 # 2) Agenda para manter após reboot / upgrade
-sudo /home/umbrel/scripts/share-media.sh --install-service
+sudo /home/umbrel/umbrel-scripts/media/share-media.sh --install-service
+```
+
+Alternativa a partir do seu PC (copia o repositório inteiro):
+
+```bash
+scp -r . umbrel@<IP-DO-UMBREL>:/home/umbrel/umbrel-scripts
 ```
 
 ### Manter após reboot ou upgrade
@@ -58,7 +62,7 @@ O Umbrel pode **reescrever** o `docker-compose.yml` depois de atualizar o SO ou 
 #### Instalar o agendamento (recomendado)
 
 ```bash
-sudo /home/umbrel/scripts/share-media.sh --install-service
+sudo /home/umbrel/umbrel-scripts/media/share-media.sh --install-service
 ```
 
 Isso configura:
@@ -92,7 +96,7 @@ tail -f /var/log/share-media.log
 #### Remover o agendamento
 
 ```bash
-sudo /home/umbrel/scripts/share-media.sh --uninstall-service
+sudo /home/umbrel/umbrel-scripts/media/share-media.sh --uninstall-service
 ```
 
 Isso **não** desfaz o share nos composes — só para de rodar sozinho.
@@ -102,35 +106,35 @@ Isso **não** desfaz o share nos composes — só para de rodar sozinho.
 ```bash
 # Espera maior no boot (ex.: 3 minutos) e outro arquivo de log
 sudo BOOT_DELAY_SEC=180 LOG_FILE=/var/log/share-media.log \
-  /home/umbrel/scripts/share-media.sh --install-service
+  /home/umbrel/umbrel-scripts/media/share-media.sh --install-service
 ```
 
 ### Uso
 
 ```bash
 # Execução completa (pastas + patch + reinício + verificação)
-sudo /home/umbrel/scripts/share-media.sh
+sudo /home/umbrel/umbrel-scripts/media/share-media.sh
 
 # Só simula (não altera nada)
-sudo /home/umbrel/scripts/share-media.sh --dry-run
+sudo /home/umbrel/umbrel-scripts/media/share-media.sh --dry-run
 
 # Aplica pastas/patch sem reiniciar
-sudo /home/umbrel/scripts/share-media.sh --no-restart
+sudo /home/umbrel/umbrel-scripts/media/share-media.sh --no-restart
 
 # Só reinicia jellyfin e file-browser
-sudo /home/umbrel/scripts/share-media.sh --restart-only
+sudo /home/umbrel/umbrel-scripts/media/share-media.sh --restart-only
 
 # Reaplica somente se pastas/mount estiverem ausentes
-sudo /home/umbrel/scripts/share-media.sh --ensure
+sudo /home/umbrel/umbrel-scripts/media/share-media.sh --ensure
 
 # Só verifica o estado (exit 0 = OK, exit 1 = precisa ação)
-sudo /home/umbrel/scripts/share-media.sh --check
+sudo /home/umbrel/umbrel-scripts/media/share-media.sh --check
 
 # Agenda no boot + semanalmente
-sudo /home/umbrel/scripts/share-media.sh --install-service
+sudo /home/umbrel/umbrel-scripts/media/share-media.sh --install-service
 
 # Remove o agendamento
-sudo /home/umbrel/scripts/share-media.sh --uninstall-service
+sudo /home/umbrel/umbrel-scripts/media/share-media.sh --uninstall-service
 ```
 
 ### Depois de rodar — configuração na UI
@@ -149,7 +153,7 @@ sudo /home/umbrel/scripts/share-media.sh --uninstall-service
 Se a mídia sumir e o agendamento não estiver instalado (ou ainda não rodou):
 
 ```bash
-sudo /home/umbrel/scripts/share-media.sh --ensure
+sudo /home/umbrel/umbrel-scripts/media/share-media.sh --ensure
 ```
 
 ### Variáveis de ambiente
@@ -167,11 +171,11 @@ Exemplo:
 
 ```bash
 sudo UMBREL_ROOT=/home/umbrel/umbrel COMPOSE_SERVICE=server \
-  /home/umbrel/scripts/share-media.sh --ensure
+  /home/umbrel/umbrel-scripts/media/share-media.sh --ensure
 ```
 
 ### Ajuda
 
 ```bash
-sudo /home/umbrel/scripts/share-media.sh --help
+sudo /home/umbrel/umbrel-scripts/media/share-media.sh --help
 ```
