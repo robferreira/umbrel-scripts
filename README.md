@@ -44,7 +44,7 @@ sudo /home/umbrel/umbrel-scripts/media/share-media.sh
 sudo /home/umbrel/umbrel-scripts/media/share-media.sh --install-service   # mantém após reboot/upgrade
 ```
 
-Depois, no Jellyfin, aponte as bibliotecas para `/media/photos`, `/media/movies` e `/media/series`. No File Browser, use `/photos`, `/movies` e `/series` (raiz do app — mesmo `data/storage` do Umbrel).
+Depois, no Jellyfin use `/media/photos`, `/media/movies`, `/media/series`. No File Browser, abra a pasta **`media`** na raiz (`media/photos`, etc.).
 
 Para detalhes, flags (`--ensure`, `--install-service`, `--check`, `--dry-run`) e logs, veja [@share-media.sh](media/README.md#share-mediash).
 

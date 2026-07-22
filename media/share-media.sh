@@ -16,16 +16,17 @@
 #   Use --ensure para só reaplicar se o mount tiver sumido.
 #   Use --install-service para agendar --ensure no boot e semanalmente.
 #
-# JELLYFIN (configuração única na UI):
-#   Biblioteca de fotos  -> /media/photos
-#   Biblioteca de filmes -> /media/movies
-#   Biblioteca de séries -> /media/series
-#
-# FILE BROWSER (já monta data/storage em /data — FB_ROOT=/data):
-#   Envie arquivos para /photos, /movies ou /series (raiz do File Browser)
-#
 # HOST (compartilhado):
-#   /home/umbrel/umbrel/data/storage/{photos,movies,series}
+#   /home/umbrel/umbrel/data/media/{photos,movies,series}
+#
+# JELLYFIN (UI):
+#   /media/photos  /media/movies  /media/series
+#
+# FILE BROWSER (UI):
+#   pasta "media" na raiz → media/photos, media/movies, media/series
+#   (caminho interno: /data/media/...)
+#   A raiz do FB no Umbrel costuma ser umbrel/home ou data/storage em /data;
+#   este script adiciona data/media montado em /data/media.
 #
 # VARIÁVEIS DE AMBIENTE:
 #   UMBREL_ROOT   Raiz da instalação Umbrel (padrão: /home/umbrel/umbrel)
@@ -33,41 +34,31 @@
 #   MEDIA_GID     GID dono das pastas (padrão: 1000)
 #
 # USO:
-#   sudo /home/umbrel/umbrel-scripts/media/share-media.sh           # execução completa
+#   sudo /home/umbrel/umbrel-scripts/media/share-media.sh
 #   sudo /home/umbrel/umbrel-scripts/media/share-media.sh --dry-run
-#   sudo /home/umbrel/umbrel-scripts/media/share-media.sh --no-restart
-#   sudo /home/umbrel/umbrel-scripts/media/share-media.sh --restart-only
 #   sudo /home/umbrel/umbrel-scripts/media/share-media.sh --ensure
 #   sudo /home/umbrel/umbrel-scripts/media/share-media.sh --check
 #   sudo /home/umbrel/umbrel-scripts/media/share-media.sh --install-service
-#   sudo /home/umbrel/umbrel-scripts/media/share-media.sh --uninstall-service
 # =============================================================================
 
 set -euo pipefail
 
 # --- Configuração ------------------------------------------------------------
-# File Browser (Umbrel) já monta data/storage em /data.
-# Este script só precisa montar o mesmo storage no Jellyfin em /media.
 UMBREL_ROOT="${UMBREL_ROOT:-/home/umbrel/umbrel}"
-STORAGE_REL="data/storage"
-LEGACY_MEDIA_REL="data/media"
-MEDIA_ROOT="${UMBREL_ROOT}/${STORAGE_REL}"
-MEDIA_SUBDIRS=(photos movies series)
-REQUIRED_APPS=(jellyfin file-browser)
-PATCH_APPS=(jellyfin)
-RESTART_APPS=(jellyfin file-browser)
+MEDIA_REL="data/media"
+MEDIA_ROOT="${UMBREL_ROOT}/${MEDIA_REL}"
+MEDIA_SUBDIRS=(photos movies series files)
+APPS=(jellyfin file-browser)
 MARKER="# umbrel-media-share"
 MEDIA_UID="${MEDIA_UID:-1000}"
 MEDIA_GID="${MEDIA_GID:-1000}"
 COMPOSE_SERVICE="${COMPOSE_SERVICE:-server}"
 
-JELLYFIN_MOUNT='${UMBREL_ROOT}/data/storage:/media'
-# Mount nativo do File Browser no Umbrel (não adicionamos outro volume)
-FILEBROWSER_NATIVE_MOUNT='${UMBREL_ROOT}/data/storage:/data'
+JELLYFIN_MOUNT='${UMBREL_ROOT}/data/media:/media'
+FILEBROWSER_MOUNT='${UMBREL_ROOT}/data/media:/data/media'
 
 APP_SCRIPT="/usr/local/lib/node_modules/umbreld/source/modules/apps/legacy-compat/app-script"
 
-# Agendamento automático (reboot + verificação semanal)
 SERVICE_NAME="umbrel-share-media"
 SYSTEMD_SERVICE="/etc/systemd/system/${SERVICE_NAME}.service"
 SYSTEMD_TIMER="/etc/systemd/system/${SERVICE_NAME}.timer"
@@ -175,8 +166,9 @@ has_umbreld() {
 
 mount_for_app() {
   case "$1" in
-    jellyfin) echo "$JELLYFIN_MOUNT" ;;
-    *) die "App sem mount gerenciado por este script: $1" ;;
+    jellyfin)      echo "$JELLYFIN_MOUNT" ;;
+    file-browser)  echo "$FILEBROWSER_MOUNT" ;;
+    *) die "App desconhecido: $1" ;;
   esac
 }
 
@@ -201,7 +193,7 @@ app_installed() {
 require_apps_installed() {
   local missing=()
   local app
-  for app in "${REQUIRED_APPS[@]}"; do
+  for app in "${APPS[@]}"; do
     app_installed "$app" || missing+=("$app")
   done
   [[ ${#missing[@]} -eq 0 ]] || die \
@@ -213,26 +205,13 @@ compose_service_exists() {
   yq -e ".services.${COMPOSE_SERVICE}" "$compose_file" >/dev/null 2>&1
 }
 
-compose_has_host_mount() {
-  local compose_file="$1"
-  local host_rel="$2"
-  local mount_dest="$3"
-  grep -qF "\${UMBREL_ROOT}/${host_rel}:${mount_dest}" "$compose_file" 2>/dev/null
-}
-
 compose_has_media_mount() {
   local compose_file="$1"
   local mount_dest="$2"
-  compose_has_host_mount "$compose_file" "$STORAGE_REL" "$mount_dest"
+  grep -qF "\${UMBREL_ROOT}/${MEDIA_REL}:${mount_dest}" "$compose_file" 2>/dev/null
 }
 
-file_browser_native_ok() {
-  local compose_file
-  compose_file="$(compose_file_for file-browser)"
-  compose_has_host_mount "$compose_file" "$STORAGE_REL" "/data"
-}
-
-# Remove mounts legados (data/media) e duplicatas do destino atual
+# Remove mounts gerenciados por este script (data/media no destino) e legado data/storage:/media
 remove_old_media_entries() {
   local compose_file="$1"
   local mount_dest="$2"
@@ -246,44 +225,11 @@ remove_old_media_entries() {
   tmp="$(mktemp)"
   awk -v marker="$MARKER" -v dest=":${mount_dest}" '
     index($0, marker) { next }
-    /\$\{UMBREL_ROOT\}\/data\/media/ { next }
-    /\$\{UMBREL_ROOT\}\/data\/storage/ && index($0, dest) { next }
+    /\$\{UMBREL_ROOT\}\/data\/media/ && index($0, dest) { next }
+    /\$\{UMBREL_ROOT\}\/data\/storage:\/media/ { next }
     { print }
   ' "$compose_file" > "$tmp"
   mv "$tmp" "$compose_file"
-}
-
-# Remove só mounts legados data/media (ex.: File Browser de versões antigas do script)
-cleanup_legacy_media_mounts() {
-  local app="$1"
-  local compose_file
-
-  app_installed "$app" || return 0
-  compose_file="$(compose_file_for "$app")"
-
-  if ! grep -qF '${UMBREL_ROOT}/data/media' "$compose_file" 2>/dev/null \
-     && ! grep -qF "$MARKER" "$compose_file" 2>/dev/null; then
-    return 0
-  fi
-
-  log "[$app] Removendo mounts legados (data/media) ..."
-  if [[ "$DRY_RUN" == true ]]; then
-    log "[$app] (dry-run) Removeria entradas ${LEGACY_MEDIA_REL} e marcadores"
-    return 0
-  fi
-
-  local backup="${compose_file}.bak.legacy.$(date +%Y%m%d-%H%M%S)"
-  cp -a "$compose_file" "$backup"
-
-  local tmp
-  tmp="$(mktemp)"
-  awk -v marker="$MARKER" '
-    index($0, marker) { next }
-    /\$\{UMBREL_ROOT\}\/data\/media/ { next }
-    { print }
-  ' "$compose_file" > "$tmp"
-  mv "$tmp" "$compose_file"
-  log "[$app] Legacy limpo (backup: $backup)"
 }
 
 restore_backup() {
@@ -308,7 +254,7 @@ patch_compose() {
   fi
 
   if compose_has_media_mount "$compose_file" "$mount_dest"; then
-    log "[$app] Volume de storage já configurado em $(basename "$compose_file")"
+    log "[$app] Volume de mídia já configurado em $(basename "$compose_file")"
     return 0
   fi
 
@@ -325,8 +271,7 @@ patch_compose() {
 
   remove_old_media_entries "$compose_file" "$mount_dest"
 
-  # Mantém ${UMBREL_ROOT} literal (substituído pelo Umbrel ao subir o container)
-  if ! yq -i ".services.${COMPOSE_SERVICE}.volumes += [\"\${UMBREL_ROOT}/${STORAGE_REL}:${mount_dest}\"]" \
+  if ! yq -i ".services.${COMPOSE_SERVICE}.volumes += [\"\${UMBREL_ROOT}/${MEDIA_REL}:${mount_dest}\"]" \
       "$compose_file"; then
     restore_backup "$compose_file" "$backup"
     die "[$app] Falha ao aplicar yq; compose restaurado do backup"
@@ -337,11 +282,10 @@ patch_compose() {
     die "[$app] Mount não apareceu após o patch; compose restaurado do backup"
   fi
 
-  # Insere marcador na linha imediatamente acima do volume (comentário YAML)
   local tmp
   tmp="$(mktemp)"
   awk -v dest=":${mount_dest}" -v marker="$MARKER" '
-    /\$\{UMBREL_ROOT\}\/data\/storage/ && index($0, dest) && !seen {
+    /\$\{UMBREL_ROOT\}\/data\/media/ && index($0, dest) && !seen {
       match($0, /^[[:space:]]*/)
       indent = substr($0, RSTART, RLENGTH)
       print indent marker
@@ -355,10 +299,10 @@ patch_compose() {
 }
 
 setup_media_dirs() {
-  log "Criando pastas de mídia em ${MEDIA_ROOT} ..."
+  log "Criando estrutura em ${MEDIA_ROOT} ..."
   if [[ "$DRY_RUN" == true ]]; then
     log "(dry-run) mkdir -p ${MEDIA_ROOT}/{${MEDIA_SUBDIRS[*]}}"
-    log "(dry-run) chown ${MEDIA_UID}:${MEDIA_GID} e chmod 755 só nas subpastas criadas"
+    log "(dry-run) chown ${MEDIA_UID}:${MEDIA_GID}; chmod 755 nas pastas"
     return 0
   fi
 
@@ -366,17 +310,18 @@ setup_media_dirs() {
   local sub
   for sub in "${MEDIA_SUBDIRS[@]}"; do
     mkdir -p "${MEDIA_ROOT}/${sub}"
-    # Não faz chown -R em todo data/storage (há downloads e outros dados do Umbrel)
     chown "${MEDIA_UID}:${MEDIA_GID}" "${MEDIA_ROOT}/${sub}"
     chmod 755 "${MEDIA_ROOT}/${sub}"
   done
+  chown "${MEDIA_UID}:${MEDIA_GID}" "${MEDIA_ROOT}"
+  chmod 755 "${MEDIA_ROOT}"
   log "Pastas prontas: ${MEDIA_ROOT}/{${MEDIA_SUBDIRS[*]}}"
 }
 
 media_dirs_ok() {
   local sub
   [[ -d "$MEDIA_ROOT" ]] || return 1
-  for sub in "${MEDIA_SUBDIRS[@]}"; do
+  for sub in photos movies series; do
     [[ -d "${MEDIA_ROOT}/${sub}" ]] || return 1
   done
   return 0
@@ -384,13 +329,12 @@ media_dirs_ok() {
 
 compose_mounts_ok() {
   local app compose_file mount_dest
-  for app in "${PATCH_APPS[@]}"; do
+  for app in "${APPS[@]}"; do
     app_installed "$app" || return 1
     compose_file="$(compose_file_for "$app")"
     mount_dest="$(mount_dest_for_app "$app")"
     compose_has_media_mount "$compose_file" "$mount_dest" || return 1
   done
-  file_browser_native_ok || return 1
   return 0
 }
 
@@ -417,21 +361,37 @@ restart_app() {
   warn "[$app] Reinício automático falhou. Reinicie manualmente pela UI do Umbrel."
 }
 
+# Prefere o container *_server_* (evita app_proxy)
 find_container() {
-  local pattern="$1"
-  docker ps --format '{{.Names}}' | grep -E "${pattern}" | head -n1 || true
+  local app="$1"
+  local names name
+  names="$(docker ps --format '{{.Names}}' | grep -E "${app}" || true)"
+  [[ -n "$names" ]] || return 0
+
+  while IFS= read -r name; do
+    [[ "$name" == *"_server_"* || "$name" == *"_server" ]] && { echo "$name"; return 0; }
+  done <<< "$names"
+
+  echo "$names" | head -n1
 }
 
-container_has_storage_mount() {
+container_has_dest_mount() {
   local container="$1"
-  local dest_hint="$2"
+  local dest="$2"
   docker inspect "$container" \
     --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}' \
-    2>/dev/null | grep -F "data/storage" | grep -qF "$dest_hint"
+    2>/dev/null | grep -qF " -> ${dest}"
+}
+
+container_media_mount_line() {
+  local container="$1"
+  docker inspect "$container" \
+    --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}' \
+    2>/dev/null | grep -F "data/media" || true
 }
 
 verify_setup() {
-  local expect_live="${1:-true}"  # false em dry-run / antes de reiniciar
+  local expect_live="${1:-true}"
   local status=0
 
   log "========== Verificação =========="
@@ -444,85 +404,55 @@ verify_setup() {
     status=1
   fi
 
-  # Jellyfin: mount data/storage -> /media
-  local app="jellyfin" container compose_file mount_dest
-  if ! app_installed "$app"; then
-    warn "[$app] App não instalado (compose ausente)"
-    status=1
-  else
+  local app container compose_file mount_dest mounts
+  for app in "${APPS[@]}"; do
     mount_dest="$(mount_dest_for_app "$app")"
+
+    if ! app_installed "$app"; then
+      warn "[$app] App não instalado (compose ausente)"
+      status=1
+      continue
+    fi
+
     compose_file="$(compose_file_for "$app")"
     if compose_has_media_mount "$compose_file" "$mount_dest"; then
-      log "[$app] Compose OK: ${STORAGE_REL} -> ${mount_dest}"
+      log "[$app] Compose OK: ${MEDIA_REL} -> ${mount_dest}"
     else
-      warn "[$app] Compose SEM mount de storage (esperado: ${STORAGE_REL}:${mount_dest})"
+      warn "[$app] Compose SEM mount (esperado: ${MEDIA_REL}:${mount_dest})"
       status=1
     fi
 
-    if [[ "$expect_live" == true ]]; then
-      container="$(find_container "${app}")"
-      if [[ -z "$container" ]]; then
-        warn "[$app] Container não encontrado em docker ps"
-        status=1
-      else
-        log "[$app] Container: ${container}"
-        local mounts
-        mounts="$(docker inspect "$container" \
-          --format '{{range .Mounts}}{{.Source}} -> {{.Destination}}{{"\n"}}{{end}}' \
-          2>/dev/null | grep -F "data/storage" || true)"
-        if echo "$mounts" | grep -qF "/media"; then
-          log "[$app] Mount OK:"
-          echo "$mounts" | while read -r line; do [[ -n "$line" ]] && log "  $line"; done
-        else
-          warn "[$app] Mount data/storage -> /media não encontrado no container"
-          log "[$app] Todos os mounts:"
-          docker inspect "$container" \
-            --format '{{range .Mounts}}  {{.Source}} -> {{.Destination}}{{"\n"}}{{end}}' \
-            2>/dev/null || true
-          status=1
-        fi
-      fi
-    else
-      log "[$app] (pulando inspeção do container — dry-run / estado ainda não reiniciado)"
+    if [[ "$expect_live" != true ]]; then
+      log "[$app] (pulando inspeção do container — dry-run / ainda não reiniciado)"
+      continue
     fi
-  fi
 
-  # File Browser: mount nativo data/storage -> /data
-  app="file-browser"
-  if ! app_installed "$app"; then
-    warn "[$app] App não instalado (compose ausente)"
-    status=1
-  else
-    compose_file="$(compose_file_for "$app")"
-    if file_browser_native_ok; then
-      log "[$app] Compose OK (nativo): ${STORAGE_REL} -> /data"
+    container="$(find_container "$app")"
+    if [[ -z "$container" ]]; then
+      warn "[$app] Container não encontrado em docker ps"
+      status=1
+      continue
+    fi
+
+    log "[$app] Container: ${container}"
+    mounts="$(container_media_mount_line "$container")"
+
+    if [[ -n "$mounts" ]] && echo "$mounts" | grep -qF " -> ${mount_dest}"; then
+      log "[$app] Mount OK:"
+      echo "$mounts" | while read -r line; do [[ -n "$line" ]] && log "  $line"; done
     else
-      warn "[$app] Compose sem mount nativo ${FILEBROWSER_NATIVE_MOUNT}"
+      warn "[$app] Mount data/media -> ${mount_dest} não encontrado no container"
+      log "[$app] Todos os mounts:"
+      docker inspect "$container" \
+        --format '{{range .Mounts}}  {{.Source}} -> {{.Destination}}{{"\n"}}{{end}}' \
+        2>/dev/null || true
       status=1
     fi
-
-    if [[ "$expect_live" == true ]]; then
-      container="$(find_container "${app}")"
-      if [[ -z "$container" ]]; then
-        warn "[$app] Container não encontrado em docker ps"
-        status=1
-      else
-        log "[$app] Container: ${container}"
-        if container_has_storage_mount "$container" "/data"; then
-          log "[$app] Mount OK: data/storage -> /data"
-        else
-          warn "[$app] Mount data/storage -> /data não encontrado no container"
-          status=1
-        fi
-      fi
-    else
-      log "[$app] (pulando inspeção do container — dry-run / estado ainda não reiniciado)"
-    fi
-  fi
+  done
 
   log "================================="
   log "Jellyfin: bibliotecas em /media/photos, /media/movies, /media/series"
-  log "File Browser: pastas /photos, /movies, /series (raiz do app)"
+  log "File Browser: pasta media/ na raiz (media/photos, media/movies, media/series)"
   return "$status"
 }
 
@@ -534,18 +464,14 @@ needs_action() {
 
 apply_compose_patches() {
   local app
-  # Limpa mounts antigos data/media de versões anteriores do script
-  for app in "${REQUIRED_APPS[@]}"; do
-    cleanup_legacy_media_mounts "$app"
-  done
-  for app in "${PATCH_APPS[@]}"; do
+  for app in "${APPS[@]}"; do
     patch_compose "$app"
   done
 }
 
 restart_apps() {
   local app
-  for app in "${RESTART_APPS[@]}"; do
+  for app in "${APPS[@]}"; do
     restart_app "$app"
   done
 }
@@ -588,19 +514,12 @@ run_ensure() {
       verify_setup false || true
       return 0
     fi
-    # Ainda valida containers ao vivo; se mount sumiu do runtime, reinicia
-    local app container needs_restart=false
-    for app in jellyfin; do
-      container="$(find_container "${app}")"
-      if [[ -z "$container" ]] || ! container_has_storage_mount "$container" "/media"; then
-        warn "[$app] Container sem mount data/storage -> /media — será reiniciado"
-        needs_restart=true
-      fi
-    done
-    for app in file-browser; do
-      container="$(find_container "${app}")"
-      if [[ -z "$container" ]] || ! container_has_storage_mount "$container" "/data"; then
-        warn "[$app] Container sem mount data/storage -> /data — será reiniciado"
+    local app container needs_restart=false mount_dest
+    for app in "${APPS[@]}"; do
+      mount_dest="$(mount_dest_for_app "$app")"
+      container="$(find_container "$app")"
+      if [[ -z "$container" ]] || ! container_has_dest_mount "$container" "$mount_dest"; then
+        warn "[$app] Container sem mount ao vivo (${mount_dest}) — será reiniciado"
         needs_restart=true
       fi
     done
@@ -629,8 +548,6 @@ install_systemd_units() {
 
   if [[ "$DRY_RUN" == true ]]; then
     log "(dry-run) Criaria ${SYSTEMD_SERVICE} e ${SYSTEMD_TIMER}"
-    log "(dry-run) ExecStart=${script} --ensure"
-    log "(dry-run) OnBootSec=${BOOT_DELAY_SEC}s + verificação semanal (domingo 04:00)"
     return 0
   fi
 
@@ -671,10 +588,7 @@ EOF
   systemctl daemon-reload
   systemctl enable --now "${SERVICE_NAME}.timer"
   log "systemd instalado: ${SYSTEMD_TIMER}"
-  log "  - no boot: espera ${BOOT_DELAY_SEC}s e roda --ensure"
-  log "  - semanal: domingo 04:00 (pega upgrades sem reboot)"
-  log "  - log: ${LOG_FILE}"
-  log "Status: systemctl status ${SERVICE_NAME}.timer"
+  log "  - boot: +${BOOT_DELAY_SEC}s --ensure | semanal: domingo 04:00 | log: ${LOG_FILE}"
 }
 
 install_cron() {
@@ -682,13 +596,11 @@ install_cron() {
 
   if [[ "$DRY_RUN" == true ]]; then
     log "(dry-run) Criaria ${CRON_FILE}"
-    log "(dry-run) @reboot sleep ${BOOT_DELAY_SEC} && ${script} --ensure"
-    log "(dry-run) 0 4 * * 0 ${script} --ensure"
     return 0
   fi
 
   cat > "$CRON_FILE" <<EOF
-# Gerenciado por share-media.sh — não edite à mão; use --uninstall-service
+# Gerenciado por share-media.sh — use --uninstall-service para remover
 SHELL=/bin/bash
 PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
 UMBREL_ROOT=${UMBREL_ROOT}
@@ -698,9 +610,6 @@ UMBREL_ROOT=${UMBREL_ROOT}
 EOF
   chmod 644 "$CRON_FILE"
   log "cron instalado: ${CRON_FILE}"
-  log "  - no boot: espera ${BOOT_DELAY_SEC}s e roda --ensure"
-  log "  - semanal: domingo 04:00"
-  log "  - log: ${LOG_FILE}"
 }
 
 remove_cron_if_present() {
@@ -717,7 +626,7 @@ remove_cron_if_present() {
 remove_systemd_if_present() {
   if [[ -f "$SYSTEMD_TIMER" ]] || [[ -f "$SYSTEMD_SERVICE" ]]; then
     if [[ "$DRY_RUN" == true ]]; then
-      log "(dry-run) Desabilitaria e removeria unidades systemd ${SERVICE_NAME}"
+      log "(dry-run) Removeria unidades systemd ${SERVICE_NAME}"
       return 0
     fi
     if has_systemd; then
@@ -738,10 +647,9 @@ install_service() {
   [[ -f "$script" ]] || die "Script não encontrado: $script"
   [[ -x "$script" ]] || chmod +x "$script"
 
-  log "Instalando agendamento automático (--ensure no boot + semanal) ..."
+  log "Instalando agendamento automático ..."
   log "Script: ${script}"
 
-  # Evita duplicar: remove o outro backend antes de instalar
   if has_systemd; then
     remove_cron_if_present
     install_systemd_units "$script"
@@ -750,15 +658,14 @@ install_service() {
     remove_systemd_if_present
     install_cron "$script"
   fi
-
-  log "Pronto. Após reboot ou upgrade, o mount será reaplicado se sumir."
+  log "Pronto. Após reboot/upgrade, o mount será reaplicado se sumir."
 }
 
 uninstall_service() {
   log "Removendo agendamento automático ..."
   remove_systemd_if_present
   remove_cron_if_present
-  log "Agendamento removido. O share de mídia nos composes não foi alterado."
+  log "Agendamento removido. O share nos composes não foi alterado."
 }
 
 main() {
@@ -804,14 +711,11 @@ main() {
   apply_compose_patches
 
   if [[ "$NO_RESTART" == true ]]; then
-    log "Pulando reinício (--no-restart). Reinicie os apps pela UI ou rode sem essa flag."
-    if [[ "$DRY_RUN" == true ]]; then
-      log "(dry-run) Verificação abaixo reflete o estado ATUAL dos containers, não o resultado simulado."
-    fi
+    log "Pulando reinício (--no-restart)."
     verify_setup false || true
   else
     if [[ "$DRY_RUN" == true ]]; then
-      log "(dry-run) Verificação abaixo reflete o estado ATUAL (nada foi alterado)."
+      log "(dry-run) Verificação abaixo reflete o estado ATUAL."
       restart_apps
       verify_setup false || true
     else
